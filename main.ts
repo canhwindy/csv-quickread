@@ -7,7 +7,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 
-setFlagsFromString('--no-liftoff');
+// Only V8's incremental marking is turned off, as the house baseline does. Wasm compiler flags must
+// not be changed at run time: Node 26 aborts on them.
+setFlagsFromString('--no-incremental-marking');
 
 const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';

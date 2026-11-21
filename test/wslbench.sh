@@ -4,7 +4,7 @@
 # Every run must exit 0 and write answers.json with the sha256 given as the 4th argument (when
 # given), so a crashed or wrong run is never counted as a time.
 # Usage (inside WSL): bash test/wslbench.sh <entry dir> <kit dir> [runs] [expected sha256]
-NODE=$(ls -d ~/n22/node-v22.23.5-linux-x64/bin/node)
+NODE=${NODE:-$(ls -d ~/n22/node-v22.23.5-linux-x64/bin/node)}
 ENTRY=$1
 KIT=$2
 RUNS=${3:-10}

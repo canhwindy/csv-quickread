@@ -2,7 +2,7 @@
 # A/B timing: runs two entries' main.ts alternately (so drift in the machine hits both alike),
 # pinned to one CPU, and prints each one's trimmed mean of user+sys CPU ms. Each run must exit 0.
 # Usage (inside WSL): bash test/ab.sh <entry A> <entry B> <kit dir> [rounds]
-NODE=$(ls -d ~/n22/node-v22.23.5-linux-x64/bin/node)
+NODE=${NODE:-$(ls -d ~/n22/node-v22.23.5-linux-x64/bin/node)}
 A=$1
 B=$2
 KIT=$3
