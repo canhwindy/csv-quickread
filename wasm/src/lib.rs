@@ -8,6 +8,7 @@
 //! a stray CR dropped). The same algorithm as rawcsv.js, which stays as the fallback.
 #![no_std]
 
+use core::arch::wasm32::{u8x16_bitmask, u8x16_eq, u8x16_splat, v128, v128_load, v128_or, v128_store};
 use core::panic::PanicInfo;
 
 #[panic_handler]
@@ -32,6 +33,60 @@ const E_OUT_FULL: i32 = -1;
 const E_ERR_FULL: i32 = -2;
 const E_FIELDS_FULL: i32 = -3;
 const E_BROKEN: i32 = -4;
+
+/// Copies bytes from src[p..te) to out[o..] up to the first byte equal to a or b (16 at a time
+/// while it can); returns the new (p, o). It may write up to 15 bytes past the copied ones, which
+/// the callers leave room for.
+#[inline(always)]
+unsafe fn copy_until2(src: *const u8, mut p: usize, te: usize, out: *mut u8, mut o: usize, a: u8, b: u8) -> (usize, usize) {
+    let va = u8x16_splat(a);
+    let vb = u8x16_splat(b);
+    while p + 16 <= te {
+        let v = v128_load(src.add(p) as *const v128);
+        v128_store(out.add(o) as *mut v128, v);
+        let m = u8x16_bitmask(v128_or(u8x16_eq(v, va), u8x16_eq(v, vb)));
+        if m == 0 {
+            p += 16;
+            o += 16;
+            continue;
+        }
+        let k = m.trailing_zeros() as usize;
+        return (p + k, o + k);
+    }
+    while p < te {
+        let c = *src.add(p);
+        if c == a || c == b {
+            break;
+        }
+        *out.add(o) = c;
+        o += 1;
+        p += 1;
+    }
+    (p, o)
+}
+
+/// Index of the first byte in src[p..te) equal to a or b, or te.
+#[inline(always)]
+unsafe fn find2(src: *const u8, mut p: usize, te: usize, a: u8, b: u8) -> usize {
+    let va = u8x16_splat(a);
+    let vb = u8x16_splat(b);
+    while p + 16 <= te {
+        let v = v128_load(src.add(p) as *const v128);
+        let m = u8x16_bitmask(v128_or(u8x16_eq(v, va), u8x16_eq(v, vb)));
+        if m != 0 {
+            return p + m.trailing_zeros() as usize;
+        }
+        p += 16;
+    }
+    while p < te {
+        let c = *src.add(p);
+        if c == a || c == b {
+            return p;
+        }
+        p += 1;
+    }
+    te
+}
 
 struct Reader {
     src: *const u8,
@@ -185,19 +240,9 @@ impl Reader {
             // The hot loop: local copies of the pointers, so writes to the output cannot be taken
             // to change them.
             {
-                let src = self.src;
-                let out = self.out;
-                let mut o = self.o;
-                while p < te {
-                    let b = unsafe { *src.add(p) };
-                    if b == COMMA || b == BS {
-                        break;
-                    }
-                    unsafe { *out.add(o) = b };
-                    o += 1;
-                    p += 1;
-                }
-                self.o = o;
+                let (np, no) = unsafe { copy_until2(self.src, p, te, self.out, self.o, COMMA, BS) };
+                p = np;
+                self.o = no;
             }
             if p >= te {
                 self.p = p;
@@ -249,10 +294,7 @@ impl Reader {
         let mut i = if self.odd_scan > run_end { self.odd_scan } else { run_end };
         while i < te {
             if self.at(i) != BS {
-                let src = self.src;
-                while i < te && unsafe { *src.add(i) } != BS {
-                    i += 1;
-                }
+                i = unsafe { find2(self.src, i, te, BS, BS) };
                 continue;
             }
             let (mut c, mut l) = self.esc_class(i);
@@ -314,19 +356,9 @@ impl Reader {
                 return C_END;
             }
             if self.at(i) != BS {
-                let src = self.src;
-                let out = self.out;
-                let mut o = self.o;
-                while i < te {
-                    let b = unsafe { *src.add(i) };
-                    if b == BS {
-                        break;
-                    }
-                    unsafe { *out.add(o) = b };
-                    o += 1;
-                    i += 1;
-                }
-                self.o = o;
+                let (ni, no) = unsafe { copy_until2(self.src, i, te, self.out, self.o, BS, BS) };
+                i = ni;
+                self.o = no;
                 continue;
             }
             let (c, l) = self.esc_class(i);
@@ -522,7 +554,7 @@ pub extern "C" fn answer_case(
         r.rec_line = r.line;
         r.rec_row = if is_header { -1 } else { row_count as i64 };
         let w = if width == usize::MAX { 0 } else { width };
-        if r.o + 3 * (te - p) + 3 * w + 64 > out_cap {
+        if r.o + 3 * (te - p) + 3 * w + 96 > out_cap {
             return E_OUT_FULL;
         }
         let before = r.o;
@@ -607,4 +639,327 @@ pub extern "C" fn string_end(src: u32, pos: u32, len: u32) -> i32 {
         i += if b == BS { 2 } else { 1 };
     }
     -1
+}
+
+// ---- The outer JSON: an array of {id, input: {text, header}} ----
+
+struct Json {
+    src: *const u8,
+    len: usize,
+    j: usize,
+}
+
+impl Json {
+    #[inline(always)]
+    fn at(&self, i: usize) -> u8 {
+        if i < self.len {
+            unsafe { *self.src.add(i) }
+        } else {
+            0
+        }
+    }
+
+    fn ws(&mut self) {
+        while matches!(self.at(self.j), b' ' | b'\n' | b'\r' | b'\t') {
+            self.j += 1;
+        }
+    }
+
+    /// Index of the closing quote of the string whose opening quote is at j, or None.
+    fn string_end(&self) -> Option<usize> {
+        let mut i = self.j + 1;
+        while i < self.len {
+            i = unsafe { find2(self.src, i, self.len, DQ, BS) };
+            if i >= self.len {
+                return None;
+            }
+            if self.at(i) == DQ {
+                return Some(i);
+            }
+            i += 2;
+        }
+        None
+    }
+
+    /// A key without escapes (a key with one is left to the JavaScript locator).
+    fn key(&mut self) -> Option<(usize, usize)> {
+        if self.at(self.j) != DQ {
+            return None;
+        }
+        let end = self.string_end()?;
+        let start = self.j + 1;
+        for i in start..end {
+            if self.at(i) == BS {
+                return None;
+            }
+        }
+        self.j = end + 1;
+        Some((start, end))
+    }
+
+    fn key_is(&self, k: (usize, usize), name: &[u8]) -> bool {
+        if k.1 - k.0 != name.len() {
+            return false;
+        }
+        for (n, &b) in name.iter().enumerate() {
+            if self.at(k.0 + n) != b {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn skip_value(&mut self) -> bool {
+        self.ws();
+        let b = self.at(self.j);
+        if b == DQ {
+            match self.string_end() {
+                Some(end) => {
+                    self.j = end + 1;
+                    return true;
+                }
+                None => return false,
+            }
+        }
+        if b == b'{' || b == b'[' {
+            let mut depth = 0i32;
+            while self.j < self.len {
+                let c = self.at(self.j);
+                if c == DQ {
+                    match self.string_end() {
+                        Some(end) => {
+                            self.j = end + 1;
+                            continue;
+                        }
+                        None => return false,
+                    }
+                }
+                if c == b'{' || c == b'[' {
+                    depth += 1;
+                } else if c == b'}' || c == b']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.j += 1;
+                        return true;
+                    }
+                }
+                self.j += 1;
+            }
+            return false;
+        }
+        let start = self.j;
+        while self.j < self.len && !matches!(self.at(self.j), b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t') {
+            self.j += 1;
+        }
+        self.j > start
+    }
+
+    /// Walks one object's members; `member` reads each value. False on any unexpected shape.
+    fn object(&mut self, member: &mut dyn FnMut(&mut Json, (usize, usize)) -> bool) -> bool {
+        self.ws();
+        if self.at(self.j) != b'{' {
+            return false;
+        }
+        self.j += 1;
+        self.ws();
+        if self.at(self.j) == b'}' {
+            self.j += 1;
+            return true;
+        }
+        loop {
+            self.ws();
+            let k = match self.key() {
+                Some(k) => k,
+                None => return false,
+            };
+            self.ws();
+            if self.at(self.j) != b':' {
+                return false;
+            }
+            self.j += 1;
+            self.ws();
+            if !member(self, k) {
+                return false;
+            }
+            self.ws();
+            match self.at(self.j) {
+                b',' => self.j += 1,
+                b'}' => {
+                    self.j += 1;
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// Finds each case's text in cases.json (src[0..len)) and writes, per case, three u32s at `out`:
+/// the text's first byte, its closing quote and 1 when header is true. Returns the number of cases,
+/// or -1 when the file is shaped otherwise (the JavaScript locator then takes it).
+#[no_mangle]
+pub extern "C" fn locate_cases(src: u32, len: u32, out: u32, max: u32) -> i32 {
+    let mut p = Json { src: src as usize as *const u8, len: len as usize, j: 0 };
+    let out = out as usize as *mut u32;
+    p.ws();
+    if p.at(p.j) != b'[' {
+        return -1;
+    }
+    p.j += 1;
+    p.ws();
+    if p.at(p.j) == b']' {
+        return 0;
+    }
+    let mut count = 0usize;
+    loop {
+        if count as u32 >= max {
+            return -1;
+        }
+        let mut text: Option<(usize, usize)> = None;
+        let mut header = false;
+        let mut has_input = false;
+        let ok = p.object(&mut |p: &mut Json, k| {
+            if !p.key_is(k, b"input") {
+                return p.skip_value();
+            }
+            has_input = true;
+            text = None;
+            header = false;
+            p.object(&mut |p: &mut Json, k| {
+                if p.key_is(k, b"text") {
+                    if p.at(p.j) != DQ {
+                        // A text that is not a string is left to the JavaScript readers.
+                        return false;
+                    }
+                    match p.string_end() {
+                        Some(end) => {
+                            text = Some((p.j + 1, end));
+                            p.j = end + 1;
+                            true
+                        }
+                        None => false,
+                    }
+                } else if p.key_is(k, b"header") {
+                    let start = p.j;
+                    if !p.skip_value() {
+                        return false;
+                    }
+                    header = p.j - start == 4
+                        && p.at(start) == b't'
+                        && p.at(start + 1) == b'r'
+                        && p.at(start + 2) == b'u'
+                        && p.at(start + 3) == b'e';
+                    true
+                } else {
+                    p.skip_value()
+                }
+            })
+        });
+        if !ok || !has_input {
+            return -1;
+        }
+        let (ts, te) = match text {
+            Some(t) => t,
+            None => return -1,
+        };
+        unsafe {
+            *out.add(count * 3) = ts as u32;
+            *out.add(count * 3 + 1) = te as u32;
+            *out.add(count * 3 + 2) = header as u32;
+        }
+        count += 1;
+        p.ws();
+        match p.at(p.j) {
+            b',' => p.j += 1,
+            b']' => return count as i32,
+            _ => return -1,
+        }
+    }
+}
+
+/// Reads the next case of cases.json from src[pos..len), the bytes in memory so far: with `first`,
+/// the array's opening bracket comes first. Writes the case's text start, its closing quote, 1 when
+/// header is true, 1 when a case was read and 1 when the array ended after it, as five u32s at out
+/// (positions relative to src). Returns the position after the case and its separator, or -1 when
+/// the bytes so far do not hold a whole case (more input may, or the file is shaped otherwise).
+#[no_mangle]
+pub extern "C" fn locate_next(src: u32, len: u32, pos: u32, first: u32, out: u32) -> i32 {
+    let mut p = Json { src: src as usize as *const u8, len: len as usize, j: pos as usize };
+    let out = out as usize as *mut u32;
+    let put = |k: usize, v: u32| unsafe { *out.add(k) = v };
+    put(3, 0);
+    put(4, 0);
+    p.ws();
+    if first != 0 {
+        if p.at(p.j) != b'[' {
+            return -1;
+        }
+        p.j += 1;
+        p.ws();
+        if p.j >= p.len {
+            return -1;
+        }
+        if p.at(p.j) == b']' {
+            put(4, 1);
+            return (p.j + 1) as i32;
+        }
+    }
+    let mut text: Option<(usize, usize)> = None;
+    let mut header = false;
+    let mut has_input = false;
+    let ok = p.object(&mut |p: &mut Json, k| {
+        if !p.key_is(k, b"input") {
+            return p.skip_value();
+        }
+        has_input = true;
+        text = None;
+        header = false;
+        p.object(&mut |p: &mut Json, k| {
+            if p.key_is(k, b"text") {
+                if p.at(p.j) != DQ {
+                    return false;
+                }
+                match p.string_end() {
+                    Some(end) => {
+                        text = Some((p.j + 1, end));
+                        p.j = end + 1;
+                        true
+                    }
+                    None => false,
+                }
+            } else if p.key_is(k, b"header") {
+                let start = p.j;
+                if !p.skip_value() || p.j >= p.len {
+                    return false;
+                }
+                header = p.j - start == 4
+                    && p.at(start) == b't'
+                    && p.at(start + 1) == b'r'
+                    && p.at(start + 2) == b'u'
+                    && p.at(start + 3) == b'e';
+                true
+            } else {
+                p.skip_value() && p.j < p.len
+            }
+        })
+    });
+    if !ok || !has_input {
+        return -1;
+    }
+    let (ts, te) = match text {
+        Some(t) => t,
+        None => return -1,
+    };
+    p.ws();
+    let end = match p.at(p.j) {
+        b',' => 0,
+        b']' => 1,
+        _ => return -1,
+    };
+    put(0, ts as u32);
+    put(1, te as u32);
+    put(2, header as u32);
+    put(3, 1);
+    put(4, end);
+    (p.j + 1) as i32
 }

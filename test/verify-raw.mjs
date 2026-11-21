@@ -16,8 +16,8 @@ const useWasm = process.env.IMPL === 'wasm';
 const transformCases = useWasm
   ? (bytes) => {
       writeFileSync(join(scratch, 'cases.json'), bytes);
-      const left = writeAnswers(join(scratch, 'cases.json'), join(scratch, 'answers.json'));
-      return left === null ? readBack(join(scratch, 'answers.json')) : null;
+      const ok = writeAnswers(join(scratch, 'cases.json'), join(scratch, 'answers.json'));
+      return ok ? readBack(join(scratch, 'answers.json')) : null;
     }
   : rawTransform;
 
@@ -57,6 +57,9 @@ compare('practice', JSON.parse(practice.toString('utf8')), practice);
 let seed = 987654321;
 const rand = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
 const alphabet = ['a', 'b', ',', '"', '""', '\r', '\n', '\r\n', ' ', '﻿', 'é', '\t', '\\', '/', ' ', '😀', '\uD800'];
+// LONG=1 adds runs of plain characters of every length up to 40, so the 16-byte steps of the
+// module's scanning meet specials at every offset of a block.
+if (process.env.LONG) for (let n = 1; n <= 40; n++) alphabet.push('x'.repeat(n), 'é'.repeat(n % 7 + 1) + 'y'.repeat(n));
 
 function oddString(s) {
   let r = '"';
@@ -76,7 +79,7 @@ for (let b = 0; b < batches; b++) {
   const cases = [];
   for (let k = 0; k < 50; k++) {
     let text = rand() < 0.1 ? '﻿' : '';
-    const len = Math.floor(rand() * 40);
+    const len = Math.floor(rand() * (process.env.LONG ? 120 : 40));
     for (let i = 0; i < len; i++) text += alphabet[Math.floor(rand() * alphabet.length)];
     cases.push({ id: `f-${k}`, input: { text, header: rand() < 0.5 } });
   }

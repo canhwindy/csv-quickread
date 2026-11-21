@@ -17,9 +17,9 @@ const answersPath = join(outputDir, 'answers.json');
 let pending = true;
 try {
   const { writeAnswers } = (await import(new URL('./wasmcsv.js', import.meta.url).href)) as {
-    writeAnswers: (inPath: string, outPath: string) => Buffer | null;
+    writeAnswers: (inPath: string, outPath: string) => boolean;
   };
-  pending = writeAnswers(casesPath, answersPath) !== null;
+  pending = !writeAnswers(casesPath, answersPath);
 } catch {
   pending = true;
 }

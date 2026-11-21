@@ -8,7 +8,7 @@ const mark = (name) => marks.push([name, process.cpuUsage()]);
 const [casesPath, outDir] = process.argv.slice(2);
 const { writeAnswers } = await import('../wasmcsv.js');
 mark('import');
-if (writeAnswers(casesPath, `${outDir}/answers.json`) !== null) throw new Error('fell back');
+if (!writeAnswers(casesPath, `${outDir}/answers.json`)) throw new Error('fell back');
 mark('answer+write');
 let line = '';
 for (let i = 0; i < marks.length; i++) {
@@ -16,3 +16,12 @@ for (let i = 0; i < marks.length; i++) {
   line += `${marks[i][0]} ${d.toFixed(0)}  `;
 }
 console.log(`${line}total ${ms(process.cpuUsage()).toFixed(0)}`);
+// A second and third pass in the same process show what is first-time cost (compiling, faulting
+// fresh pages) and what is the steady cost of the work itself.
+if (process.env.REPEAT) {
+  for (let r = 0; r < 2; r++) {
+    const a = process.cpuUsage();
+    writeAnswers(casesPath, `${outDir}/answers.json`);
+    console.log(`  again: ${ms(process.cpuUsage(a)).toFixed(0)} ms`);
+  }
+}
