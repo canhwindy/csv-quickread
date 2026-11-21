@@ -433,6 +433,7 @@ function answerCase(ts, te, header) {
 // ---- The outer JSON: an array of {id, input: {text, header}} ----
 
 let J = 0;
+let STRING_END = null; // optional faster finder of a case text's closing quote (from J)
 
 function ws() {
   const src = SRC;
@@ -557,7 +558,7 @@ function readCases() {
           found.text = -2;
           return skipValue();
         }
-        const end = stringEnd();
+        const end = STRING_END === null ? stringEnd() : STRING_END(J);
         if (end < 0) return false;
         found.text = J + 1;
         found.textEnd = end;
@@ -639,4 +640,16 @@ export function warmUp() {
     });
   }
   transformCases(Buffer.from(json + ']', 'latin1'));
+}
+
+// Where each case's text sits in the cases.json bytes ({text, textEnd, header} per case), or null
+// when the file is not shaped as expected. Used by the WebAssembly reader too, which passes its
+// own finder for the end of each (long) text string.
+export function locateCases(bytes, stringEndAt = null) {
+  SRC = bytes;
+  STRING_END = stringEndAt;
+  const cases = readCases();
+  SRC = null;
+  STRING_END = null;
+  return cases;
 }

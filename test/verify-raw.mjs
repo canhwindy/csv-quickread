@@ -1,11 +1,25 @@
-// Checks the byte-level fast path (rawcsv.js) against csv-reader 1.0.0: the practice cases, then
+// Checks the byte-level fast paths (rawcsv.js, and wasmcsv.js with IMPL=wasm) against csv-reader 1.0.0: the practice cases, then
 // fuzz batches written both as JSON.stringify writes them and with random \uXXXX escapes, odd key
 // order and whitespace, so the reader cannot lean on one serializer's habits.
 // Usage: node test/verify-raw.mjs <kit dir> [batches]
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { transformCases } from '../rawcsv.js';
+import { transformCases as rawTransform } from '../rawcsv.js';
+import { writeFileSync, mkdtempSync, readFileSync as readBack } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { writeAnswers } from '../wasmcsv.js';
+
+const scratch = mkdtempSync(join(tmpdir(), 'csvq-'));
+
+const useWasm = process.env.IMPL === 'wasm';
+const transformCases = useWasm
+  ? (bytes) => {
+      writeFileSync(join(scratch, 'cases.json'), bytes);
+      const left = writeAnswers(join(scratch, 'cases.json'), join(scratch, 'answers.json'));
+      return left === null ? readBack(join(scratch, 'answers.json')) : null;
+    }
+  : rawTransform;
 
 const kit = process.argv[2];
 const batches = Number(process.argv[3] ?? 200);
@@ -72,5 +86,5 @@ for (let b = 0; b < batches; b++) {
     : `{"id":"${c.id}","input":{"text":${oddString(c.input.text)},"header":${c.input.header},"x":[1,{"y":"]"}]}}`)).join(' ,\n') + ' ]';
   compare(`batch ${b} odd`, cases, Buffer.from(odd));
 }
-console.log(bad ? `FAILED: ${bad} problems` : `all good (practice + ${batches * 50} fuzz cases, two encodings each)`);
+console.log(bad ? `FAILED: ${bad} problems` : `all good [${useWasm ? 'wasm' : 'js'}] (practice + ${batches * 50} fuzz cases, two encodings each)`);
 process.exit(bad ? 1 : 0);
